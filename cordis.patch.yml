@@ -1,0 +1,11 @@
+# Bundle patch: installs the egress router row. This config is the fallback
+# layer beneath the profile's own override (the Settings UI writes the override).
+- insert:
+    - id: egress-router
+      name: dsh-egress-router
+      config:
+        mode: system
+        proxy: http://127.0.0.1:7897
+        keepModelDirect: true
+        probeIntervalMs: 5000
+        probeTimeoutMs: 800
