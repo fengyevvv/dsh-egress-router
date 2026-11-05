@@ -4,12 +4,12 @@
 
 - **模型请求（DeepSeek）直连**，不经过代理；
 - **`web_fetch` / 子进程走代理**（Clash、V2Ray 等）；
-- **代理挂了自动回落直连**，恢复后自动切回；
+- **代理不可用时**只让「应急直连」名单内的域名直连，名单外请求保持失败关闭，避免真实 IP 泄露；代理恢复后自动切回；
 - 在 **设置 → 通用 → 出站分流** 里切换：全部直连 / 跟随系统 / 手动代理。
 
-不依赖 `.env`，不写任何状态文件，启动路径零 I/O，任何异常都降级为直连。
+不依赖 `.env`，不写任何状态文件，启动路径零 I/O；失败时保持失败关闭或仅启用应急名单。
 
-> 当前版本：`0.1.1` · 平台：Windows（`system` 模式读 Windows 注册表）· 适配 DSH `0.2.1-rc.2`
+> 当前版本：`0.1.3` · 平台：Windows（`system` 模式读 Windows 注册表）· 适配 DSH `0.2.1-rc.5`
 
 ---
 
@@ -36,13 +36,28 @@ DSH 原生只在启动时读一次代理环境变量，之后没有运行时开�
 | `system` | 读 Windows 注册表 `HKCU\...\Internet Settings` 的 `ProxyEnable` / `ProxyServer` / `ProxyOverride`（也就是 Clash 的「系统代理」开关） |
 | `manual` | 用配置里的 `proxy` 地址 |
 
-健康检查：每 `probeIntervalMs` 毫秒对代理做一次 TCP 连接探测；失败且 `fallbackToDirect: true` 时切到直连，恢复后自动切回。
+健康检查：每 `probeIntervalMs` 毫秒**通过代理实际请求一次** `probeUrl`；失败时进入“代理不可用”状态：
+
+- 只有 `emergencyDirectHosts` 里的域名改为直连；
+- 其他请求继续走已失效的代理并失败，**不会自动切直连**；
+- 代理恢复后，名单内域名自动回到代理。
+
+只有显式设置 `fallbackToDirect: true` 时才恢复旧行为：代理失败时全部直连（可能暴露真实 IP，不推荐）。
+
+## 应急直连
+
+**设置 → 通用 → 出站分流 → 应急直连**：
+
+- 输入域名或 IP，点「添加」；
+- 每条右侧 `×` 删除；
+- 只有代理不可用时才生效；代理正常时这些域名仍然走代理；
+- 名单为空时，代理一挂，所有外网请求都会失败（失败关闭）。
 
 ## 兼容性
 
 | 项 | 要求 |
 |---|---|
-| DSH | `0.2.1-rc.2`（同版本实测） |
+| DSH | `0.2.1-rc.2` 到 `0.2.x`（`0.2.1-rc.5` 实测） |
 | 平台 | Windows 10/11（`system` 模式依赖注册表） |
 | Node | DSH 自带运行时即可（Node 22+） |
 | 代理 | HTTP(S) 代理；Clash 的「混合端口」用 `http://127.0.0.1:7897` 即可 |
@@ -53,7 +68,7 @@ DSH 原生只在启动时读一次代理环境变量，之后没有运行时开�
 
 ### 方式 A：手动安装（已实测，推荐）
 
-1. 从 [Releases](../../releases) 下载 `dsh-egress-router-0.1.1.zip`，解压；或直接 clone 本仓库。
+1. 从 [Releases](../../releases) 下载 `dsh-egress-router-0.1.3.zip`，解压；或直接 clone 本仓库。
 2. 把 `lib/` 和 `package.json` 复制到 profile 的 `node_modules` 下：
 
 ```powershell
@@ -101,10 +116,12 @@ dsh plugin --profile web add dsh-egress-router
 | `mode` | `system` | `direct` / `system` / `manual` |
 | `proxy` | `http://127.0.0.1:7897` | manual 模式的代理地址，只支持 `http://` / `https://` |
 | `keepModelDirect` | `true` | 把 `deepseek.com` 加进 `NO_PROXY` |
-| `noProxy` | `[]` | 额外直连主机（可写具体 IP / 主机名，不支持 `192.168.*` 这类网段） |
-| `fallbackToDirect` | `true` | 代理不可用时回落直连 |
+| `noProxy` | `[]` | 额外直连主机（**始终**绕过代理；可写具体 IP / 主机名，不支持 `192.168.*` 这类网段） |
+| `emergencyDirectHosts` | `[]` | **仅代理不可用**时直连的域名列表；名单外请求保持失败关闭 |
+| `fallbackToDirect` | `false` | 设为 `true` 时，代理不可用就全部直连（旧行为，可能泄露 IP） |
+| `probeUrl` | `https://www.gstatic.com/generate_204` | 通过代理实际请求的探测地址 |
 | `probeIntervalMs` | `5000` | 探测周期；`0` 关闭探测 |
-| `probeTimeoutMs` | `800` | 单次探测超时 |
+| `probeTimeoutMs` | `2500` | 单次 HTTP 探测超时 |
 
 环境变量 kill switch：`DSH_EGRESS_DISABLE=1` 时插件完全不接管。
 
@@ -114,7 +131,8 @@ dsh plugin --profile web add dsh-egress-router
 
 - 下拉框：全部直连 / 跟随系统 / 手动代理；
 - 手动模式显示代理地址输入框；
-- 「模型请求直连」复选框。
+- 「模型请求直连」复选框；
+- 「应急直连」列表：输入域名/IP 后点“添加”，每条右侧 `×` 删除；仅在代理不可用时生效。
 
 保存写入 profile 的 `cordis.patch.yml`，Host 收到配置更新后立即重新安装策略，无需重启。
 
@@ -123,13 +141,13 @@ dsh plugin --profile web add dsh-egress-router
 - 问模型一句话，能正常回复 → 模型直连正常；
 - 让 agent 抓 `https://en.wikipedia.org/robots.txt` → 200 说明网页走了代理；
 - 设置页能看到「出站分流」→ client 半边加载正常；
-- 关掉 Clash，等 5～10 秒再抓外网 → 应报网络错误而不是卡死；重新打开 Clash 后应自动恢复。
+- 关掉 Clash，等 5～10 秒再抓外网 → 名单外应报网络错误；名单内国内站仍可直连；重新打开 Clash 后名单内域名自动回代理。
 
 ## 安全设计
 
 1. `apply()` 不读写文件、不探测网络、不抛异常；
 2. 所有探测/换策略都在 `setImmediate` 之后异步执行；
-3. 任何失败（代理 URL 非法、注册表读失败、install 抛错）都回落直连；
+3. 任何失败（代理 URL 非法、注册表读失败、install 抛错）都保持失败关闭，或只启用应急名单；不会自动全量直连；
 4. 不使用 `setInterval`，定时器由插件生命周期管理并在卸载时清理；
 5. 卸载/关闭时把启动时的策略还原，包括环境变量；
 6. 不写任何 JSON / 状态文件，重启不会读到半截数据。
@@ -147,7 +165,7 @@ dsh plugin --profile web add dsh-egress-router
 
 - 只支持 HTTP(S) 代理；SOCKS 会被 `@deepseek-ai/dsh-http-proxy` 拒绝并跳过。
 - Windows `ProxyOverride` 里的 `192.168.*`、`10.*`、CIDR 无法用共享匹配器表达，会被丢弃；`web_fetch` 本来就拒绝私有地址，所以只影响局域网 MCP / 子进程访问内网设备。需要时用 `noProxy` 列出具体主机。
-- Clash 的 fake-ip 模式（DNS 返回 `198.18.0.0/15`）不影响走代理的请求；只在“回落直连”时可能被 DSH 的私有地址校验拦住。
+- Clash 的 fake-ip 模式（DNS 返回 `198.18.0.0/15`）不影响走代理的请求；只在直连（应急名单）时可能被 DSH 的私有地址校验拦住。
 - 代理地址不要写带账号密码的 URL（会明文落盘）。
 - `system` 模式只读 Windows 注册表；macOS / Linux 只读启动环境变量。
 

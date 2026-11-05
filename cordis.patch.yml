@@ -7,5 +7,8 @@
         mode: system
         proxy: http://127.0.0.1:7897
         keepModelDirect: true
+        emergencyDirectHosts: []
+        fallbackToDirect: false
+        probeUrl: https://www.gstatic.com/generate_204
         probeIntervalMs: 5000
-        probeTimeoutMs: 800
+        probeTimeoutMs: 2500

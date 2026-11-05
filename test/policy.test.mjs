@@ -40,11 +40,13 @@ test('resolveEffective applies defaults and clamps probe settings', () => {
 	const effective = resolveEffective({ mode: 'manual', proxy: 'http://127.0.0.1:7897' });
 	assert.equal(effective.proxyUrl, 'http://127.0.0.1:7897/');
 	assert.equal(effective.keepModelDirect, true);
-	assert.equal(effective.fallbackToDirect, true);
+	assert.equal(effective.fallbackToDirect, false);
+	assert.deepEqual(effective.emergencyDirectHosts, []);
+	assert.equal(effective.probeUrl, 'https://www.gstatic.com/generate_204');
 	assert.equal(effective.probeIntervalMs, 5000);
-	assert.equal(effective.probeTimeoutMs, 800);
+	assert.equal(effective.probeTimeoutMs, 2500);
 	assert.equal(resolveEffective({ probeIntervalMs: -5 }).probeIntervalMs, 0);
-	assert.equal(resolveEffective({ probeTimeoutMs: 1 }).probeTimeoutMs, 100);
+	assert.equal(resolveEffective({ probeTimeoutMs: 1 }).probeTimeoutMs, 200);
 	assert.equal(resolveEffective({ probeIntervalMs: 10 ** 9 }).probeIntervalMs, 3_600_000);
 });
 
@@ -57,6 +59,8 @@ test('effectiveNoProxy always carries model hosts and loopback', () => {
 	assert.ok(bypass.split(',').includes('::1'));
 	const noModel = effectiveNoProxy(resolveEffective({ keepModelDirect: false }));
 	assert.ok(!noModel.split(',').includes('deepseek.com'));
+	const withEmergency = effectiveNoProxy(resolveEffective({}), ['baidu.com']);
+	assert.ok(withEmergency.split(',').includes('baidu.com'));
 });
 
 test('planFor: direct mode publishes no proxy names', () => {
@@ -64,28 +68,47 @@ test('planFor: direct mode publishes no proxy names', () => {
 });
 
 test('planFor: manual mode proxies with bypass and model direct', () => {
-	const plan = planFor(resolveEffective({ mode: 'manual', proxy: 'http://127.0.0.1:7897' }), true);
+	const plan = planFor(
+		resolveEffective({ mode: 'manual', proxy: 'http://127.0.0.1:7897', emergencyDirectHosts: ['baidu.com'] }),
+		true
+	);
 	assert.equal(plan.kind, 'proxy');
 	assert.equal(plan.values.http_proxy, 'http://127.0.0.1:7897/');
 	assert.equal(plan.values.https_proxy, 'http://127.0.0.1:7897/');
 	assert.match(plan.values.no_proxy, /deepseek\.com/);
 	assert.match(plan.values.no_proxy, /localhost/);
+	assert.ok(!plan.values.no_proxy.split(',').includes('baidu.com'));
 });
 
-test('planFor: unreachable proxy falls back to direct by default', () => {
-	assert.deepEqual(planFor(resolveEffective({ mode: 'manual', proxy: 'http://127.0.0.1:7897' }), false), {
-		kind: 'fallback',
-		values: {}
-	});
+test('planFor: unreachable proxy stays fail-closed by default', () => {
+	const plan = planFor(resolveEffective({ mode: 'manual', proxy: 'http://127.0.0.1:7897' }), false);
+	assert.equal(plan.kind, 'proxy');
+	assert.equal(plan.values.https_proxy, 'http://127.0.0.1:7897/');
+	assert.ok(!plan.values.no_proxy.split(',').includes('baidu.com'));
 });
 
-test('planFor: fallbackToDirect=false keeps the proxy plan', () => {
+test('planFor: unreachable proxy enables only the emergency direct hosts', () => {
 	const plan = planFor(
-		resolveEffective({ mode: 'manual', proxy: 'http://127.0.0.1:7897', fallbackToDirect: false }),
+		resolveEffective({
+			mode: 'manual',
+			proxy: 'http://127.0.0.1:7897',
+			emergencyDirectHosts: ['baidu.com', 'bilibili.com']
+		}),
 		false
 	);
 	assert.equal(plan.kind, 'proxy');
 	assert.equal(plan.values.https_proxy, 'http://127.0.0.1:7897/');
+	assert.ok(plan.values.no_proxy.split(',').includes('baidu.com'));
+	assert.ok(plan.values.no_proxy.split(',').includes('bilibili.com'));
+	assert.equal(plan.emergency, true);
+	assert.equal(plan.emergencyCount, 2);
+});
+
+test('planFor: fallbackToDirect=true opts into all-direct on failure', () => {
+	assert.deepEqual(
+		planFor(resolveEffective({ mode: 'manual', proxy: 'http://127.0.0.1:7897', fallbackToDirect: true }), false),
+		{ kind: 'fallback', values: {} }
+	);
 });
 
 test('planFor: manual mode without a usable URL stays direct', () => {
@@ -105,7 +128,9 @@ test('planFor: system mode reuses launch proxy variables', () => {
 	assert.equal(plan.values.https_proxy, 'http://127.0.0.1:7897');
 	assert.match(plan.values.no_proxy, /corp\.example/);
 	assert.match(plan.values.no_proxy, /deepseek\.com/);
-	assert.deepEqual(planFor(effective, false), { kind: 'fallback', values: {} });
+	const down = planFor(effective, false);
+	assert.equal(down.kind, 'proxy');
+	assert.equal(down.values.https_proxy, 'http://127.0.0.1:7897');
 });
 
 test('proxyOfEnv prefers https, then http, then all', () => {
